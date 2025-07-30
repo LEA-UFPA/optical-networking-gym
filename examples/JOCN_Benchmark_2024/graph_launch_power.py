@@ -10,6 +10,7 @@ from datetime import datetime
 from optical_networking_gym.wrappers.qrmsa_gym import QRMSAEnvWrapper
 
 from optical_networking_gym.topology import Modulation, get_topology
+from optical_networking_gym.core.bands import BandS, BandC, BandL
 
 # ===================================================
 # 1. Definição da Função run_environment
@@ -69,7 +70,11 @@ def run_environment(
         heuristic_shortest_available_path_first_fit_best_modulation,
         heuristic_highest_snr,
         heuristic_lowest_fragmentation,
-        heuristic_mscl_sequential_simplified
+        heuristic_mscl,
+        heuristic_mscl_simplified,
+        heuristic_mscl_sequential_simplified,
+        #heuristic_load_balancing_first_fit,
+        heuristic_psr,
     )
 
     # Configurações do ambiente
@@ -78,7 +83,7 @@ def run_environment(
         seed=seed,
         allow_rejection=allow_rejection,
         load=load,
-        episode_length=episode_length,
+        episode_length=10,
         num_spectrum_resources=num_spectrum_resources,
         launch_power_dbm=launch_power_dbm,
         bandwidth=bandwidth,
@@ -89,23 +94,37 @@ def run_environment(
         margin=margin,
         file_name=file_name,
         measure_disruptions=measure_disruptions,
-        k_paths=5, 
+        k_paths=3, 
         modulations_to_consider=6,
         defragmentation=defragmentation,
         n_defrag_services=n_defrag_services,
         gen_observation=gen_observation,
+        bands=[BandS(), BandC(), BandL()],  # SUPORTE MULTIBANDA
     )
 
     # Seleção da heurística baseada no índice
-    fn_heuristic = 4
+    fn_heuristic = 10
     if heuristic == 1:
-        fn_heuristic = heuristic_mscl_sequential_simplified#heuristic_shortest_available_path_first_fit_best_modulation
+        fn_heuristic = heuristic_shortest_available_path_first_fit_best_modulation
     elif heuristic == 2:
         fn_heuristic = shortest_available_path_lowest_spectrum_best_modulation
     elif heuristic == 3:
         fn_heuristic = best_modulation_load_balancing
     elif heuristic == 4:
         fn_heuristic = load_balancing_best_modulation
+    elif heuristic == 5:
+        fn_heuristic = heuristic_mscl
+    elif heuristic == 6:
+        fn_heuristic = heuristic_mscl_simplified
+    elif heuristic == 7:
+        fn_heuristic = heuristic_mscl_sequential_simplified
+    #elif heuristic == 8:
+    #    fn_heuristic = heuristic_load_balancing_first_fit
+    elif heuristic == 9:
+        print("[INFO] Rodando PSR-C (variant='C') em ambiente multibanda!")
+        fn_heuristic = lambda env: heuristic_psr(env, variant='C')
+    elif heuristic == 10:
+        fn_heuristic = lambda env: heuristic_psr(env, variant='O')
     else:
         raise ValueError(f"Heuristic index `{heuristic}` is not found!")
 
@@ -195,28 +214,28 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-e', '--num_episodes',
         type=int,
-        default=15,
+        default=100,
         help='Number of episodes to be simulated (default: 1000)'
     )
 
     parser.add_argument(
         '-s', '--episode_length',
         type=int,
-        default=1000,
+        default=50000,
         help='Number of arrivals per episode to be generated (default: 50)'
     )
 
     parser.add_argument(
         '-l', '--load',
         type=int,
-        default=400,
+        default=150,
         help='Load to be used in the simulation (default: 210)'
     )
 
     parser.add_argument(
         '-th', '--threads',
         type=int,
-        default= 10,
+        default= 5,
         help='Number of threads to be used for running simulations (default: 2)'
     )
 
@@ -224,9 +243,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '-hi', '--heuristic_index',
         type=int,
-        default=1,
-        choices=[1, 2, 3, 4],
-        help='Heuristic index to be used (1: First Fit, 2: Lowest Spectrum, 3: Load Balancing Modulation, 4: Load Balancing Best Modulation)'
+        default=9,
+        choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        help='Heuristic index to be used (1: First Fit, 2: Lowest Spectrum, 3: Load Balancing Modulation, 4: Load Balancing Best Modulation, 9: PSR-C, 10: PSR-O)'
     )
 
     parser.add_argument(
@@ -301,9 +320,9 @@ def main():
     default_noise_figure_db = 4.5
 
     # Carregamento da topologia
-    topology_path = os.path.join(
-         "examples", "topologies", args.topology_file
-     )
+    topology_path =  r'examples/topologies/germany50.xml'#os.path.join(
+    #      "examples", "topologies", args.topology_file
+    #  )
     if not os.path.exists(topology_path):
         raise FileNotFoundError(f"Topology file '{topology_path}' not found.")
 
@@ -319,9 +338,10 @@ def main():
 
     # Parâmetros de simulação
     threads = args.threads
-    bandwidth = 4e12
-    frequency_start = 3e8 / 1565e-9
+    num_spectrum_resources = 640
     frequency_slot_bandwidth = 12.5e9
+    bandwidth = num_spectrum_resources * frequency_slot_bandwidth  # 8e11
+    frequency_start = 3e8 / 1565e-9
     bit_rates = (10, 40, 100, 400)
 
     # Definição das potências de lançamento
@@ -337,9 +357,9 @@ def main():
             topology,                      # topology
             seed,                          # seed
             True,                          # allow_rejection
-            args.load,                     # load
+            150,                           # load
             args.episode_length,           # episode_length
-            320,                           # num_spectrum_resources (mantendo o mesmo valor anterior)
+            num_spectrum_resources,        # num_spectrum_resources
             launch_power,                  # launch_power_dbm
             bandwidth,                     # bandwidth
             frequency_start,               # frequency_start

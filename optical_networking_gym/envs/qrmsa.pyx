@@ -196,6 +196,8 @@ cdef class QRMSAEnv:
     cdef int episode_defrag_cicles
     cdef int episode_service_realocations
     cdef bint gen_observation
+    cdef public object bands  # Adicionado para multibanda
+    cdef public object current_band  # Adicionado para multibanda
 
     topology: cython.declare(nx.Graph, visibility="readonly")
     bit_rate_selection: cython.declare(Literal["continuous", "discrete"], visibility="readonly")
@@ -231,6 +233,7 @@ cdef class QRMSAEnv:
         defragmentation: bool = False,
         n_defrag_services: int = 0,
         gen_observation: bool = True,
+        bands: object = None,  # Adicionado explicitamente
     ):
         self.gen_observation = gen_observation
         self.defragmentation = defragmentation
@@ -410,6 +413,16 @@ cdef class QRMSAEnv:
         self.episode_service_realocations = 0
         if reset:
             self.reset()
+
+        # --- SUPORTE A MULTIBANDA ---
+        if bands is None:
+            self.bands = []
+        else:
+            self.bands = bands
+        if self.bands:
+            self.current_band = self.bands[1]  # Banda C como padrão
+        else:
+            self.current_band = None
 
     cpdef tuple reset(self, object seed=None, dict options=None):
         self.episode_bit_rate_requested = 0.0
@@ -869,7 +882,19 @@ cdef class QRMSAEnv:
                 service=self.current_service,
                 modulation=modulation
             )
-            if self.is_path_free(path=path, initial_slot=initial_slot, number_slots=number_slots):
+            try:
+                if not self.is_path_free(path=path, initial_slot=initial_slot, number_slots=number_slots):
+                    # print(f"[DEBUG] Caminho/slot não livre para service {self.current_service.service_id}, rejeitando ação.")
+                    self.current_service.blocked_due_to_resources = True
+                    self.current_service.accepted = False
+                    reward = self.reward()
+                    terminated = False
+                    truncated = False
+                    info = {"blocked_due_to_resources": 1, "blocked_due_to_osnr": 0, "rejected": 1}
+                    observation, mask = self.observation()
+                    info.update(mask)
+                    self._next_service()
+                    return (observation, reward, terminated, truncated, info)
                 self.current_service.path = path
                 self.current_service.initial_slot = initial_slot
                 self.current_service.number_slots = number_slots
@@ -905,14 +930,9 @@ cdef class QRMSAEnv:
                     self.current_service.accepted = False
                     self.current_service.blocked_due_to_osnr = True
                     self.bl_osnr += 1
-            else:
-                raise ValueError(
-                    f"Path {path} is not free for service {self.current_service.service_id} "
-                    f"with initial slot {initial_slot} and number of slots {number_slots}."
-                )
-                self.current_service.accepted = False
-                self.current_service.blocked_due_to_resources = True
-                self.bl_resource += 1
+            except Exception as e:
+                # Se outro erro inesperado, relança
+                raise e
 
         if self.measure_disruptions and self.current_service.accepted:
             services_to_measure = []
@@ -1165,11 +1185,65 @@ cdef class QRMSAEnv:
 
             return cur_spectrum_compactness
 
-    cpdef int get_number_slots(self, object service, object modulation):
-            cdef double required_slots
-            required_slots = service.bit_rate / (modulation.spectral_efficiency * self.channel_width)
-            return int(math.ceil(required_slots))
+    # --- SUPORTE A MULTIBANDA: ordem de bandas C, L, S ---
+    def get_band_order(self):
+        # Retorna as bandas na ordem C, L, S se todas existirem
+        order = []
+        for name in ["C", "L", "S"]:
+            for b in self.bands:
+                if b.name == name:
+                    order.append(b)
+        return order if order else self.bands
 
+    cpdef int get_number_slots(self, object service, object modulation):
+        # Usa o número de slots da banda atual
+        if hasattr(self, 'current_band') and self.current_band is not None:
+            channel_width = (self.current_band.freq_end - self.current_band.freq_start) * 1e12 / self.current_band.num_slots
+        else:
+            channel_width = self.channel_width
+        required_slots = service.bit_rate / (modulation.spectral_efficiency * channel_width)
+        return int(math.ceil(required_slots))
+
+    def try_allocate_service_multiband(self, service, modulations):
+        # Tenta alocar o serviço em cada banda na ordem C, L, S
+        for band in self.get_band_order():
+            print(f"Tentando alocar na banda: {band.name}")  #Indica a troca de banda
+            self.current_band = band
+            # Atualiza parâmetros do ambiente para a banda
+            self.num_spectrum_resources = band.num_slots
+            self.frequency_start = band.freq_start * 1e12
+            self.frequency_end = band.freq_end * 1e12
+            self.bandwidth = (band.freq_end - band.freq_start) * 1e12
+            self.frequency_slot_bandwidth = self.bandwidth / band.num_slots
+            self.launch_power_dbm = band.input_power
+            self.launch_power = 10 ** ((self.launch_power_dbm - 30) / 10)
+            self.margin = 0
+            self.topology.graph["available_slots"] = np.ones(
+                (self.topology.number_of_edges(), self.num_spectrum_resources), dtype=np.int32
+            )
+            # Tenta alocar usando a lógica padrão (primeira banda disponível)
+            for path in self.k_shortest_paths[service.source, service.destination]:
+                available_slots = self.get_available_slots(path)
+                for idm, modulation in enumerate(reversed(modulations)):
+                    number_slots = self.get_number_slots(service, modulation)
+                    candidatos = self._get_candidates(available_slots, number_slots, self.num_spectrum_resources)
+                    if candidatos:
+                        for candidate in candidatos:
+                            service.path = path
+                            service.initial_slot = candidate
+                            service.number_slots = number_slots
+                            service.center_frequency = (
+                                self.frequency_start +
+                                self.frequency_slot_bandwidth * (candidate + number_slots / 2)
+                            )
+                            service.bandwidth = self.frequency_slot_bandwidth * number_slots
+                            service.launch_power = self.launch_power
+                            service.blocked_due_to_resources = False
+                            osnr, _, _ = calculate_osnr(self, service)
+                            if osnr >= modulation.minimum_osnr + self.margin:
+                                service.current_modulation = modulation
+                                return True  # Alocação bem-sucedida
+        return False  # Não foi possível alocar em nenhuma banda
 
     cpdef public is_path_free(self, path, initial_slot: int, number_slots: int):
         end = initial_slot + number_slots
@@ -1212,35 +1286,24 @@ cdef class QRMSAEnv:
 
     
     cpdef _provision_path(self, object path, cnp.int64_t initial_slot, int number_slots):
+        # Provisiona na banda atual
         cdef int i, path_length, link_index
         cdef int start_slot = initial_slot
         cdef int end_slot = start_slot + number_slots
         cdef tuple node_list = path.get_node_list() 
         cdef object link  
-
         if end_slot < self.num_spectrum_resources:
             end_slot+=1
         elif end_slot > self.num_spectrum_resources:
             raise ValueError("End slot is greater than the number of spectrum resources.")
-            
         path_length = len(node_list)
         for i in range(path_length - 1):
             link_index = self.topology[node_list[i]][node_list[i + 1]]["index"]
-            self.topology.graph["available_slots"][
-                link_index,
-                start_slot:end_slot
-            ] = 0
-
-            self.spectrum_slots_allocation[
-                link_index,
-                start_slot:end_slot
-            ] = self.current_service.service_id
-
+            self.topology.graph["available_slots"][link_index, start_slot:end_slot] = 0
+            self.spectrum_slots_allocation[link_index, start_slot:end_slot] = self.current_service.service_id
             self.topology[node_list[i]][node_list[i + 1]]["services"].append(self.current_service)
             self.topology[node_list[i]][node_list[i + 1]]["running_services"].append(self.current_service)
-
         self.topology.graph["running_services"].append(self.current_service)
-
         self.current_service.path = path
         self.current_service.initial_slot = initial_slot
         self.current_service.number_slots = number_slots
@@ -1250,15 +1313,12 @@ cdef class QRMSAEnv:
             self.frequency_slot_bandwidth * (number_slots / 2.0)
         )
         self.current_service.bandwidth = self.frequency_slot_bandwidth * number_slots
-
         self.services_accepted += 1
         self.episode_services_accepted += 1
-
         self.bit_rate_provisioned += self.current_service.bit_rate
         self.episode_bit_rate_provisioned = <cnp.int64_t>(
             self.episode_bit_rate_provisioned + self.current_service.bit_rate
         )
-
         if self.bit_rate_selection == "discrete":
             self.slots_provisioned_histogram[self.current_service.number_slots] += 1
             self.bit_rate_provisioned_histogram[self.current_service.bit_rate] += 1
@@ -1336,7 +1396,7 @@ cdef class QRMSAEnv:
             slot_allocation = <cnp.ndarray[cnp.int32_t, ndim=1]> np.asarray(slot_allocation, dtype=np.int32)
             slot_allocation_view = slot_allocation
 
-            used_spectrum_slots = self.num_spectrum_resources - np.sum(slot_allocation)
+            used_spectrum_slots = self.num_spectrum_resources - int(np.sum(slot_allocation))
 
             cur_util = <double> used_spectrum_slots / self.num_spectrum_resources
 

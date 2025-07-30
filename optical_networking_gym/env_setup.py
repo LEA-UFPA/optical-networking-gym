@@ -5,6 +5,7 @@ def setup_environment(num_episodes: int, episode_length: int, load: int, num_slo
     from gymnasium import spaces
     from optical_networking_gym.topology import Modulation, get_topology
     from optical_networking_gym.wrappers.qrmsa_gym import QRMSAEnvWrapper
+    from optical_networking_gym.core.core_classes import BandS, BandC, BandL
 
     ###################################
     # Define Modulations
@@ -57,6 +58,9 @@ def setup_environment(num_episodes: int, episode_length: int, load: int, num_slo
 
     cur_modulations = define_modulations()
 
+    # --- SUPORTE A MULTIBANDA ---
+    bands = [BandS(), BandC(), BandL()]
+
     ###################################
     # Load Topology
     ###################################
@@ -104,6 +108,7 @@ def setup_environment(num_episodes: int, episode_length: int, load: int, num_slo
         file_name=f"./results/PPO_setup_env",
         measure_disruptions=False,
         k_paths=2,
+        bands=bands,  # NOVO: passar as bandas
     )
 
     env_id = 'QRMSAEnvWrapper-v0'

@@ -141,3 +141,35 @@ cdef class Modulation:
         self.spectral_efficiency = spectral_efficiency
         self.minimum_osnr = minimum_osnr if minimum_osnr >= 0 else -1
         self.inband_xt = inband_xt if inband_xt >= 0 else -1
+
+# Classe base para Bandas
+cdef class Band:
+    cdef public str name
+    cdef public double freq_start
+    cdef public double freq_end
+    cdef public int num_slots
+    cdef public double noise_figure
+    cdef public double attenuation
+    cdef public double input_power
+
+    def __init__(self, str name, double freq_start, double freq_end, int num_slots, double noise_figure, double attenuation, double input_power):
+        self.name = name
+        self.freq_start = freq_start
+        self.freq_end = freq_end
+        self.num_slots = num_slots
+        self.noise_figure = noise_figure
+        self.attenuation = attenuation
+        self.input_power = input_power
+
+# Bandas específicas com parâmetros da tabela
+cdef class BandS(Band):
+    def __init__(self):
+        Band.__init__(self, "S", 197.22, 205.30, 647, 7.0, 0.220, -0.38)
+
+cdef class BandC(Band):
+    def __init__(self):
+        Band.__init__(self, "C", 191.60, 195.90, 344, 5.5, 0.191, -3.66)
+
+cdef class BandL(Band):
+    def __init__(self):
+        Band.__init__(self, "L", 185.83, 190.90, 406, 6.0, 0.200, -2.78)

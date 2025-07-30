@@ -25,8 +25,10 @@ class QRMSAEnvWrapper(gym.Env):
 
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, bands=None, **kwargs):
         super(QRMSAEnvWrapper, self).__init__()
+        if bands is not None:
+            kwargs['bands'] = bands
         self.env = QRMSAEnv(*args, **kwargs)
 
         self.action_space = self.env.action_space
@@ -83,4 +85,3 @@ class QRMSAEnvWrapper(gym.Env):
 
     def get_available_blocks(self, idp, num_slots, j):
         return self.env.get_available_blocks(idp, num_slots, j)
-
